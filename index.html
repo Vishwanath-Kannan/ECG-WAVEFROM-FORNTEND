@@ -2,77 +2,179 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>ECG Monitor</title>
+<title>ECG Live Monitor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
 <style>
-body {
-  margin: 0;
-  background: black;
-  color: white;
-  font-family: -apple-system, BlinkMacSystemFont;
-}
-header {
-  padding: 20px;
-  display: flex;
-  gap: 40px;
-}
-.metric span {
-  font-size: 14px;
-  opacity: 0.6;
-}
-.metric strong {
-  font-size: 28px;
-}
-canvas {
-  display: block;
-}
+  :root {
+    --bg: #000;
+    --grid: rgba(255,255,255,0.05);
+    --trace: #00ff9c;
+    --text: #ffffff;
+    --muted: #8a8a8a;
+  }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+    overflow: hidden;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    padding: 24px 32px;
+  }
+
+  .metric {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .label {
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.5px;
+  }
+
+  .value {
+    font-size: 32px;
+    font-weight: 500;
+  }
+
+  canvas {
+    width: 100vw;
+    height: calc(100vh - 120px);
+    display: block;
+  }
 </style>
 </head>
+
 <body>
 
 <header>
-  <div class="metric"><span>Heart Rate</span><br><strong id="hr">—</strong></div>
-  <div class="metric"><span>Status</span><br><strong>Live</strong></div>
+  <div class="metric">
+    <div class="label">Heart Rate</div>
+    <div class="value" id="hr">—</div>
+  </div>
+  <div class="metric">
+    <div class="label">Status</div>
+    <div class="value">Live</div>
+  </div>
 </header>
 
 <canvas id="ecg"></canvas>
 
 <script>
+/* ================= CONFIG ================= */
+const WS_URL = "wss://ecg-cloud-production.up.railway.app";
+const FS = 250;
+const BUFFER_SECONDS = 6;
+const BUFFER_SIZE = FS * BUFFER_SECONDS;
+
+/* ================= STATE ================= */
 const canvas = document.getElementById("ecg");
 const ctx = canvas.getContext("2d");
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight - 100;
+const hrEl = document.getElementById("hr");
 
-let dataBuf = [];
+let ecgBuf = new Float32Array(BUFFER_SIZE);
+let writeIdx = 0;
+let connected = false;
 
-const ws = new WebSocket("wss://ecg-cloud-production.up.railway.app");
+/* ================= CANVAS ================= */
+function resize() {
+  canvas.width = window.innerWidth * devicePixelRatio;
+  canvas.height = (window.innerHeight - 120) * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+}
+window.addEventListener("resize", resize);
+resize();
 
-ws.onmessage = e => {
-  const d = JSON.parse(e.data);
-  if (typeof d.ecg === "number") {
-    dataBuf.push(d.ecg);
-    if (dataBuf.length > canvas.width) dataBuf.shift();
+/* ================= DRAW ================= */
+function drawGrid() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = getComputedStyle(document.documentElement)
+    .getPropertyValue("--grid");
+
+  const step = 40;
+  for (let x = 0; x < canvas.width; x += step) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, canvas.height);
+    ctx.stroke();
   }
-  if (d.HR) document.getElementById("hr").innerText = d.HR + " bpm";
-};
-
-function draw() {
-  ctx.fillStyle = "black";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  ctx.strokeStyle = "#00ffa2";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-
-  dataBuf.forEach((v, i) => {
-    const y = canvas.height / 2 - v * 0.5;
-    i === 0 ? ctx.moveTo(0, y) : ctx.lineTo(i, y);
-  });
-
-  ctx.stroke();
-  requestAnimationFrame(draw);
+  for (let y = 0; y < canvas.height; y += step) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvas.width, y);
+    ctx.stroke();
+  }
 }
 
-draw();
+function drawECG() {
+  drawGrid();
+
+  ctx.strokeStyle = getComputedStyle(document.documentElement)
+    .getPropertyValue("--trace");
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+
+  const h = canvas.height / 2;
+  const scaleY = 1.2;
+
+  for (let i = 0; i < BUFFER_SIZE; i++) {
+    const idx = (writeIdx + i) % BUFFER_SIZE;
+    const x = (i / BUFFER_SIZE) * canvas.width;
+    const y = h - ecgBuf[idx] * scaleY;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+
+  ctx.stroke();
+}
+
+/* ================= WEBSOCKET ================= */
+const socket = new WebSocket(WS_URL);
+
+socket.onopen = () => {
+  console.log("ECG stream connected");
+  connected = true;
+};
+
+socket.onerror = err => {
+  console.error("WebSocket error", err);
+};
+
+socket.onmessage = e => {
+  let data;
+  try {
+    data = JSON.parse(e.data);
+  } catch {
+    return;
+  }
+
+  // ECG sample (required)
+  if (typeof data.ecg === "number") {
+    ecgBuf[writeIdx] = data.ecg;
+    writeIdx = (writeIdx + 1) % BUFFER_SIZE;
+  }
+
+  // Heart rate (optional)
+  if (typeof data.hr === "number") {
+    hrEl.textContent = `${data.hr} bpm`;
+  }
+};
+
+/* ================= LOOP ================= */
+function loop() {
+  if (connected) drawECG();
+  requestAnimationFrame(loop);
+}
+loop();
 </script>
+
 </body>
 </html>
