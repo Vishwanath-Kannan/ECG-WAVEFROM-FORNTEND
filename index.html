@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ECG Monitor</title>
+
+<style>
+  :root {
+    --bg: #0b0b0c;
+    --grid: rgba(255,255,255,0.05);
+    --trace: #00ff9c;
+    --text: #eaeaea;
+    --muted: #9a9a9a;
+  }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+                 "Helvetica Neue", Arial, sans-serif;
+  }
+
+  .topbar {
+    display: flex;
+    gap: 32px;
+    padding: 18px 28px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .metric {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .metric strong {
+    display: block;
+    font-size: 26px;
+    color: var(--text);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: calc(100vh - 90px);
+  }
+</style>
+</head>
+
+<body>
+
+<div class="topbar">
+  <div class="metric">HR — bpm<strong id="hr">—</strong></div>
+  <div class="metric">Status<strong id="status">Live</strong></div>
+</div>
+
+<canvas id="ecg"></canvas>
+
+<script>
+/* ================= CONFIG ================= */
+const WS_URL = "wss://ecg-cloud-production.up.railway.app";
+const FS = 250;
+const BUFFER_LEN = 1200;
+
+/* ================= CANVAS ================= */
+const canvas = document.getElementById("ecg");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  canvas.width = window.innerWidth * devicePixelRatio;
+  canvas.height = (window.innerHeight - 90) * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ================= DATA ================= */
+let buf = new Array(BUFFER_LEN).fill(0);
+let lastR = null;
+let rr = [];
+
+/* ================= GRID ================= */
+function drawGrid() {
+  ctx.strokeStyle = "rgba(255,255,255,0.04)";
+  ctx.lineWidth = 1;
+
+  const w = canvas.width / devicePixelRatio;
+  const h = canvas.height / devicePixelRatio;
+
+  for (let x = 0; x < w; x += 40) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+
+  for (let y = 0; y < h; y += 40) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+}
+
+/* ================= DRAW ================= */
+function drawECG() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawGrid();
+
+  ctx.strokeStyle = "#00ff9c";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+
+  const mid = canvas.height / devicePixelRatio / 2;
+  buf.forEach((v, i) => {
+    const x = i;
+    const y = mid - v;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+
+  ctx.stroke();
+}
+
+/* ================= HR ================= */
+function updateHR(sample) {
+  const thresh = 120;
+  if (sample > thresh && (!lastR || performance.now() - lastR > 300)) {
+    if (lastR) {
+      rr.push(performance.now() - lastR);
+      if (rr.length > 5) rr.shift();
+      const avg = rr.reduce((a,b)=>a+b,0)/rr.length;
+      document.getElementById("hr").innerText = Math.round(60000 / avg);
+    }
+    lastR = performance.now();
+  }
+}
+
+/* ================= WS ================= */
+const ws = new WebSocket(WS_URL);
+
+ws.onopen = () => {
+  document.getElementById("status").innerText = "Connected";
+};
+
+ws.onmessage = e => {
+  const data = JSON.parse(e.data);
+  const v = (data.ecg - 2048) * 0.35;
+
+  buf.shift();
+  buf.push(v);
+
+  updateHR(v);
+  drawECG();
+};
+
+ws.onerror = () => {
+  document.getElementById("status").innerText = "Disconnected";
+};
+</script>
+
+</body>
+</html>
